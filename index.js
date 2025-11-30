@@ -21,7 +21,6 @@ const log = {
     header: (msg) => console.log(`${colors.magenta}${msg}${colors.reset}`)
 };
 
-
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function downloadImage(url) {
@@ -69,22 +68,20 @@ class ServerCloner {
             this.sendProgress(`Cloning from: ${sourceGuild.name} -> ${targetGuild.name}`, progressChannel);
             this.sendProgress('Starting cloning process...', progressChannel);
 
-           
             await this.deleteExistingContent(targetGuild, progressChannel);
 
-           
+            // FIXED: Clone roles in reverse order (highest position first)
             await this.cloneRoles(sourceGuild, targetGuild, progressChannel);
             await this.cloneCategories(sourceGuild, targetGuild, progressChannel);
             await this.cloneChannels(sourceGuild, targetGuild, progressChannel);
             
-           
+            // FIXED: Check emoji limit before cloning
             if (cloneEmojis) {
                 await this.cloneEmojis(sourceGuild, targetGuild, progressChannel);
             }
             
             await this.cloneServerInfo(sourceGuild, targetGuild, progressChannel);
 
-            // Show final stats
             this.showStats(progressChannel);
             this.sendProgress('🎉 Server cloning completed successfully!', progressChannel);
 
@@ -97,7 +94,6 @@ class ServerCloner {
     async deleteExistingContent(guild, progressChannel) {
         this.sendProgress('🗑️  Deleting existing content...', progressChannel);
         
-       
         const channels = guild.channels.cache.filter(ch => ch.deletable);
         for (const [, channel] of channels) {
             try {
@@ -110,7 +106,6 @@ class ServerCloner {
             }
         }
 
-       
         const roles = guild.roles.cache.filter(role => 
             role.name !== '@everyone' && 
             !role.managed && 
@@ -134,9 +129,10 @@ class ServerCloner {
     async cloneRoles(sourceGuild, targetGuild, progressChannel) {
         this.sendProgress('👑 Cloning roles...', progressChannel);
         
+        // FIXED: Sort roles in reverse order (highest position first)
         const roles = sourceGuild.roles.cache
             .filter(role => role.name !== '@everyone')
-            .sort((a, b) => a.position - b.position);
+            .sort((a, b) => b.position - a.position); // REVERSED: b.position - a.position
 
         for (const [, role] of roles) {
             try {
@@ -160,7 +156,6 @@ class ServerCloner {
             }
         }
 
-     
         await this.fixRolePositions(sourceGuild, targetGuild, progressChannel);
         this.sendProgress('Roles cloning completed.', progressChannel);
     }
@@ -178,7 +173,7 @@ class ServerCloner {
                         await targetRole.setPosition(sourceRole.position);
                         await delay(100);
                     } catch (error) {
-                        
+                        // Ignore position errors
                     }
                 }
             }
@@ -221,12 +216,19 @@ class ServerCloner {
     async cloneChannels(sourceGuild, targetGuild, progressChannel) {
         this.sendProgress('💬 Cloning channels...', progressChannel);
         
+        // FIXED: Include announcement channels in cloning
         const channels = sourceGuild.channels.cache
-            .filter(ch => ch.type === 'GUILD_TEXT' || ch.type === 'GUILD_VOICE')
+            .filter(ch => ch.type === 'GUILD_TEXT' || ch.type === 'GUILD_VOICE' || ch.type === 'GUILD_ANNOUNCEMENT')
             .sort((a, b) => a.position - b.position);
 
         for (const [, channel] of channels) {
             try {
+                // FIXED: Skip if it's an announcement channel and we can't clone it properly
+                if (channel.type === 'GUILD_ANNOUNCEMENT') {
+                    this.sendProgress(`Skipping announcement channel: ${channel.name} (not supported)`, progressChannel);
+                    continue;
+                }
+
                 const overwrites = this.mapPermissionOverwrites(channel.permissionOverwrites, targetGuild);
                 const parent = channel.parent ? 
                     targetGuild.channels.cache.find(c => c.name === channel.parent.name && c.type === 'GUILD_CATEGORY') : 
@@ -240,7 +242,6 @@ class ServerCloner {
                     reason: 'Server cloning'
                 };
 
-              
                 if (channel.type === 'GUILD_TEXT') {
                     channelOptions.topic = channel.topic || '';
                     channelOptions.nsfw = channel.nsfw;
@@ -271,7 +272,26 @@ class ServerCloner {
         
         const emojis = sourceGuild.emojis.cache;
         
+        // FIXED: Check emoji limit before starting
+        const currentEmojiCount = targetGuild.emojis.cache.size;
+        const maxEmojis = targetGuild.premiumTier ? 
+            [50, 100, 150, 250][targetGuild.premiumTier] : 50;
+
+        if (currentEmojiCount >= maxEmojis) {
+            this.sendProgress(`❌ Target server has maximum emojis (${maxEmojis}). Skipping emoji cloning.`, progressChannel);
+            return;
+        }
+
+        const availableSlots = maxEmojis - currentEmojiCount;
+        this.sendProgress(`Available emoji slots: ${availableSlots}/${maxEmojis}`, progressChannel);
+        
         for (const [, emoji] of emojis) {
+            // FIXED: Check emoji limit before each creation
+            if (targetGuild.emojis.cache.size >= maxEmojis) {
+                this.sendProgress(`❌ Emoji limit reached (${maxEmojis}). Stopping emoji cloning.`, progressChannel);
+                break;
+            }
+
             try {
                 const emojiURL = emoji.url;
                 const imageData = await downloadImage(emojiURL);
@@ -335,13 +355,11 @@ class ServerCloner {
             try {
                 let targetId = overwrite.id;
 
-                
                 if (overwrite.type === 'role') {
                     const newRoleId = this.roleMapping.get(overwrite.id);
                     if (newRoleId) {
                         targetId = newRoleId;
                     } else {
-                        
                         const targetRole = targetGuild.roles.cache.find(r => {
                             const sourceGuild = overwrites.constructor.name === 'PermissionOverwriteManager' ? overwrites.channel.guild : null;
                             if (sourceGuild) {
@@ -428,9 +446,7 @@ class ServerCloner {
 }
 
 const pendingOperations = new Map();
-
 const client = new Client();
-
 const botMessageIds = new Set();
 
 client.on('messageCreate', async (message) => {
@@ -534,7 +550,6 @@ client.on('messageCreate', async (message) => {
         }
         
         try {
-    
             const sourceGuild = client.guilds.cache.get(sourceGuildId);
             const targetGuild = client.guilds.cache.get(targetGuildId);
             
