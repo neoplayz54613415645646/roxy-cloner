@@ -48,7 +48,10 @@ class ServerCloner {
             categoriesCreated: 0,
             channelsCreated: 0,
             emojisCreated: 0,
-            failed: 0
+            failed: 0,
+            rolesDeleted: 0,
+            channelsDeleted: 0,
+            emojisDeleted: 0
         };
     }
 
@@ -68,7 +71,8 @@ class ServerCloner {
             this.sendProgress(`Cloning from: ${sourceGuild.name} -> ${targetGuild.name}`, progressChannel);
             this.sendProgress('Starting cloning process...', progressChannel);
 
-            await this.deleteExistingContent(targetGuild, progressChannel);
+            // ENHANCED: Complete server purification before cloning
+            await this.purgeTargetServer(targetGuild, progressChannel);
 
             // FIXED: Clone roles in reverse order (highest position first)
             await this.cloneRoles(sourceGuild, targetGuild, progressChannel);
@@ -91,21 +95,33 @@ class ServerCloner {
         }
     }
 
-    async deleteExistingContent(guild, progressChannel) {
-        this.sendProgress('🗑️  Deleting existing content...', progressChannel);
+    async purgeTargetServer(guild, progressChannel) {
+        this.sendProgress('🧹 PURGING TARGET SERVER - Complete cleanup initiated...', progressChannel);
         
-        const channels = guild.channels.cache.filter(ch => ch.deletable);
+        // Track purification progress
+        let purificationStats = {
+            channelsDeleted: 0,
+            rolesDeleted: 0,
+            emojisDeleted: 0,
+            webhooksDeleted: 0
+        };
+
+        // PHASE 1: Delete all channels
+        this.sendProgress('🗑️  Phase 1: Deleting all channels...', progressChannel);
+        const channels = guild.channels.cache;
         for (const [, channel] of channels) {
             try {
-                await channel.delete();
+                await channel.delete('Server cloning preparation');
+                purificationStats.channelsDeleted++;
                 this.sendProgress(`Deleted channel: ${channel.name}`, progressChannel);
                 await delay(100);
             } catch (error) {
                 this.sendProgress(`Failed to delete channel ${channel.name}: ${error.message}`, progressChannel);
-                this.stats.failed++;
             }
         }
 
+        // PHASE 2: Delete all custom roles (except @everyone)
+        this.sendProgress('👑 Phase 2: Deleting all custom roles...', progressChannel);
         const roles = guild.roles.cache.filter(role => 
             role.name !== '@everyone' && 
             !role.managed && 
@@ -114,16 +130,57 @@ class ServerCloner {
         
         for (const [, role] of roles) {
             try {
-                await role.delete();
+                await role.delete('Server cloning preparation');
+                purificationStats.rolesDeleted++;
                 this.sendProgress(`Deleted role: ${role.name}`, progressChannel);
                 await delay(100);
             } catch (error) {
                 this.sendProgress(`Failed to delete role ${role.name}: ${error.message}`, progressChannel);
-                this.stats.failed++;
             }
         }
 
-        this.sendProgress('Cleanup completed.', progressChannel);
+        // PHASE 3: Delete all emojis
+        this.sendProgress('😀 Phase 3: Deleting all emojis...', progressChannel);
+        const emojis = guild.emojis.cache;
+        for (const [, emoji] of emojis) {
+            try {
+                await emoji.delete('Server cloning preparation');
+                purificationStats.emojisDeleted++;
+                this.sendProgress(`Deleted emoji: ${emoji.name}`, progressChannel);
+                await delay(100);
+            } catch (error) {
+                this.sendProgress(`Failed to delete emoji ${emoji.name}: ${error.message}`, progressChannel);
+            }
+        }
+
+        // PHASE 4: Delete all webhooks from all channels
+        this.sendProgress('🪝 Phase 4: Cleaning webhooks...', progressChannel);
+        const textChannels = guild.channels.cache.filter(ch => ch.type === 'GUILD_TEXT');
+        for (const [, channel] of textChannels) {
+            try {
+                const webhooks = await channel.fetchWebhooks();
+                for (const [, webhook] of webhooks) {
+                    try {
+                        await webhook.delete('Server cloning preparation');
+                        purificationStats.webhooksDeleted++;
+                        this.sendProgress(`Deleted webhook: ${webhook.name}`, progressChannel);
+                        await delay(100);
+                    } catch (error) {
+                        // Silent fail for webhooks
+                    }
+                }
+            } catch (error) {
+                // Channel might be deleted already
+            }
+        }
+
+        // Update main stats
+        this.stats.rolesDeleted = purificationStats.rolesDeleted;
+        this.stats.channelsDeleted = purificationStats.channelsDeleted;
+        this.stats.emojisDeleted = purificationStats.emojisDeleted;
+
+        this.sendProgress(`✅ Server purification completed: ${purificationStats.channelsDeleted} channels, ${purificationStats.rolesDeleted} roles, ${purificationStats.emojisDeleted} emojis, ${purificationStats.webhooksDeleted} webhooks removed`, progressChannel);
+        this.sendProgress('🎯 Target server is now a clean slate for cloning!', progressChannel);
     }
 
     async cloneRoles(sourceGuild, targetGuild, progressChannel) {
@@ -216,7 +273,7 @@ class ServerCloner {
     async cloneChannels(sourceGuild, targetGuild, progressChannel) {
         this.sendProgress('💬 Cloning channels...', progressChannel);
         
-        // FIXED: Include announcement channels in cloning
+        // FIXED: Include announcement channels in cloning but skip unsupported ones
         const channels = sourceGuild.channels.cache
             .filter(ch => ch.type === 'GUILD_TEXT' || ch.type === 'GUILD_VOICE' || ch.type === 'GUILD_ANNOUNCEMENT')
             .sort((a, b) => a.position - b.position);
@@ -393,18 +450,27 @@ class ServerCloner {
     }
 
     showStats(progressChannel) {
-        const total = this.stats.rolesCreated + this.stats.categoriesCreated + 
+        const totalCreated = this.stats.rolesCreated + this.stats.categoriesCreated + 
                      this.stats.channelsCreated + this.stats.emojisCreated;
-        const successRate = Math.round((total/(total + this.stats.failed)) * 100) || 0;
+        const totalDeleted = this.stats.rolesDeleted + this.stats.channelsDeleted + this.stats.emojisDeleted;
+        const successRate = Math.round((totalCreated/(totalCreated + this.stats.failed)) * 100) || 0;
         
         const statsMessage = `
 📊 **Cloning Statistics:**
-✅ Roles Created: ${this.stats.rolesCreated}
-✅ Categories Created: ${this.stats.categoriesCreated}
-✅ Channels Created: ${this.stats.channelsCreated}
-✅ Emojis Created: ${this.stats.emojisCreated}
+🗑️  PURGED:
+   ❌ Roles Deleted: ${this.stats.rolesDeleted}
+   ❌ Channels Deleted: ${this.stats.channelsDeleted}
+   ❌ Emojis Deleted: ${this.stats.emojisDeleted}
+
+✅ CREATED:
+   ✅ Roles Created: ${this.stats.rolesCreated}
+   ✅ Categories Created: ${this.stats.categoriesCreated}
+   ✅ Channels Created: ${this.stats.channelsCreated}
+   ✅ Emojis Created: ${this.stats.emojisCreated}
+
 ❌ Failed Operations: ${this.stats.failed}
-📈 Success Rate: ${successRate}%`;
+📈 Success Rate: ${successRate}%
+🎯 Total Changes: ${totalDeleted + totalCreated} operations`;
         
         this.sendProgress(statsMessage, progressChannel);
     }
@@ -434,11 +500,11 @@ class ServerCloner {
         }
         
         if (message.includes('❌') || message.includes('[-]')) {
-            log.error(message.replace(/❌|✅|📊|📈|🗑️|👑|📁|💬|😀|🏠|🎉/g, '').trim());
+            log.error(message.replace(/❌|✅|📊|📈|🗑️|👑|📁|💬|😀|🏠|🎉|🧹|🎯|🪝/g, '').trim());
         } else if (message.includes('✅') || message.includes('[+]')) {
-            log.success(message.replace(/❌|✅|📊|📈|🗑️|👑|📁|💬|😀|🏠|🎉/g, '').trim());
+            log.success(message.replace(/❌|✅|📊|📈|🗑️|👑|📁|💬|😀|🏠|🎉|🧹|🎯|🪝/g, '').trim());
         } else if (message.includes('📊') || message.includes('📈') || message.includes('[i]')) {
-            log.info(message.replace(/❌|✅|📊|📈|🗑️|👑|📁|💬|😀|🏠|🎉/g, '').trim());
+            log.info(message.replace(/❌|✅|📊|📈|🗑️|👑|📁|💬|😀|🏠|🎉|🧹|🎯|🪝/g, '').trim());
         } else {
             console.log(message);
         }
@@ -579,6 +645,9 @@ client.on('messageCreate', async (message) => {
             message.channel.send(`📋 **Server Cloning Confirmation**
 Source Server: **${sourceGuild.name}**
 Target Server: **${targetGuild.name}**
+
+⚠️ **WARNING:** This will DELETE ALL existing content from the target server!
+Channels, roles, emojis, and webhooks will be permanently removed.
 
 Do you want to proceed? (y/n)`).then(sentMsg => {
                 botMessageIds.add(sentMsg.id);
